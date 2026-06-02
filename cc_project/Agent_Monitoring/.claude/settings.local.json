@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//home/peiqi/.claude/**)",
-      "Read(//home/peiqi/**)",
-      "Bash(claude:*)"
-    ]
-  }
-}

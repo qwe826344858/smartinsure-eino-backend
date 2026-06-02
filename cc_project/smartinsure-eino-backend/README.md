@@ -1,1 +1,0 @@
-# smartinsure-eino-backend
