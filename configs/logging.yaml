@@ -1,0 +1,6 @@
+# Logging defaults. Keep runtime log files out of configs/.
+# In Docker, scripts/restart_backend_container_with_binary.sh mounts host ./logs to /app/logs.
+
+level: info
+file_path: logs/server.log
+to_console: true

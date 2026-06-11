@@ -1,0 +1,17 @@
+# Embedding runtime config.
+# Environment variables with the same meaning still take precedence.
+#
+# To use Ark, change provider to "ark" and fill model/api_key/api_base.
+# For secrets, prefer a local file such as configs/embedding.local.yaml and set:
+#   EMBEDDING_CONFIG_PATH=configs/embedding.local.yaml
+
+provider: openai_compatible
+model: text-embedding-3-small
+api_key: ""
+api_base: ""
+region: cn-beijing
+api_type: text
+timeout: 30
+batch_size: 16
+dimensions: 0
+retry_times: 2

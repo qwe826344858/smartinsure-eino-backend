@@ -1,0 +1,20 @@
+# RAG runtime defaults. Keep secrets out of this file.
+# Use configs/rag.local.yaml for local DATABASE_URL / MYSQL_DSN / Redis credentials.
+
+mysql_dsn:
+redis_url:
+database_url:
+embedding_config_path: configs/embedding.yaml
+
+product_detail_rag_enabled: false
+product_detail_rag_namespace: product_details
+product_detail_rag_min_match_rate: 0.6
+product_detail_rag_async_timeout: 30
+product_detail_rag_async_workers: 2
+product_detail_rag_queue_size: 100
+
+rag_search_enabled: true
+rag_search_namespace: product_details
+rag_search_top_k: 5
+rag_search_min_score: 0
+rag_search_timeout: 5

@@ -1,0 +1,13 @@
+# Copy this file to configs/embedding.local.yaml or configs/embedding.yaml,
+# then fill the real values.
+
+provider: ark
+model: ep-xxxxxxx-xxxxx
+api_key: ""
+api_base: https://ark.cn-beijing.volces.com/api/v3
+region: cn-beijing
+api_type: text
+timeout: 30
+batch_size: 16
+dimensions: 1024
+retry_times: 2

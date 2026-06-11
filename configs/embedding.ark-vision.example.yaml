@@ -1,0 +1,15 @@
+# Ark multimodal embedding example for doubao-embedding-vision.
+# Copy to configs/embedding.local.yaml, then fill api_key.
+
+provider: ark
+# Prefer the Ark console endpoint ID, usually ep-xxxx.
+# Replace this with the endpoint ID if direct base-model calls are not enabled.
+model: doubao-embedding-vision-241215
+api_key: ""
+api_base: https://ark.cn-beijing.volces.com/api/v3
+region: cn-beijing
+api_type: multimodal
+timeout: 30
+batch_size: 16
+dimensions: 1024
+retry_times: 2
