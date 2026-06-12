@@ -17,15 +17,17 @@ COPY configs ./configs
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/ingesturls ./cmd/ingesturls
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/exportplatformproducts ./cmd/exportplatformproducts
 
 FROM alpine:3.22
 WORKDIR /app
 
-RUN addgroup -S app && adduser -S -G app app
+RUN addgroup -S app && adduser -S -G app app && mkdir -p /app/logs && chown -R app:app /app/logs
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/server /app/server
 COPY --from=build /out/ingesturls /app/ingesturls
+COPY --from=build /out/exportplatformproducts /app/exportplatformproducts
 COPY configs ./configs
 
 ENV APP_ENV=production \
