@@ -2,6 +2,7 @@ package smartinsuredeep
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -47,6 +48,7 @@ type Agent struct {
 	// 前端按钮触发的产品详情请求不能依赖 LLM 重新复述 URL，否则可能出现链接被模型抄错或工具超时。
 	flow                *chatflow.Flow
 	finalTimeout        time.Duration
+	toolTimeout         time.Duration
 	directDetailEnabled bool
 }
 
@@ -106,7 +108,11 @@ func newProduction(cfg productionConfig) (*Agent, error) {
 
 	// 3. 复用生产 chatflow 的搜索、知识检索、产品详情等底层能力生成 DeepAgent tools。
 	flow := chatflow.NewProduction()
-	tools, err := cfg.toolFactory(flow, time.Duration(settings.AgentToolTimeout)*time.Second)
+	toolTimeout := time.Duration(settings.AgentToolTimeout) * time.Second
+	if toolTimeout <= 0 {
+		toolTimeout = 15 * time.Second
+	}
+	tools, err := cfg.toolFactory(flow, toolTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +137,7 @@ func newProduction(cfg productionConfig) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	logx.Printf("运行日志", "runtime log", "deep_agent init_success id=%s model=%s tool_timeout_seconds=%d max_iterations=%d", cfg.id, provider.Model, settings.AgentToolTimeout, maxIterations)
+	logx.Printf("运行日志", "runtime log", "deep_agent init_success id=%s model=%s tool_timeout_seconds=%d max_iterations=%d", cfg.id, provider.Model, int(toolTimeout.Seconds()), maxIterations)
 	// 5. 返回 AgentRuntime 可调用的 Agent 实例。
 	return &Agent{
 		id: cfg.id,
@@ -143,6 +149,7 @@ func newProduction(cfg productionConfig) (*Agent, error) {
 		instruction:         cfg.instruction,
 		flow:                flow,
 		finalTimeout:        finalTimeout,
+		toolTimeout:         toolTimeout,
 		directDetailEnabled: cfg.directDetailEnabled,
 	}, nil
 }
@@ -220,6 +227,7 @@ func (a *Agent) Run(ctx context.Context, req agentruntime.AgentRequest) <-chan a
 				break
 			}
 		}
+		a.emitRAGGuardSearchIfNeeded(ctx, out, req, traceID, state)
 		if state.maxIterationsExceeded {
 			a.emitFinalAnswerAfterMaxIterations(ctx, out, req, traceID, state)
 		}
@@ -395,8 +403,150 @@ func (a *Agent) emitADKMessage(out chan<- agentruntime.AgentEvent, role schema.R
 	}
 }
 
+func (a *Agent) emitRAGGuardSearchIfNeeded(ctx context.Context, out chan<- agentruntime.AgentEvent, req agentruntime.AgentRequest, traceID string, state *deepRunState) {
+	if a == nil || a.ID() != RAGAgentID {
+		return
+	}
+	if state != nil && state.knowledgeSearchUsed {
+		return
+	}
+	query := buildRAGGuardQuery(req)
+	if query == "" {
+		logx.Printf("运行日志", "runtime log", "rag_agent guard_search_skip request_id=%s reason=empty_query", req.RequestID)
+		return
+	}
+	if a.flow == nil || a.flow.Fallback == nil {
+		logx.Printf("运行日志", "runtime log", "rag_agent guard_search_skip request_id=%s reason=searcher_unavailable query_chars=%d", req.RequestID, len([]rune(query)))
+		return
+	}
+	timeout := a.toolTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	logx.Printf("运行日志", "runtime log", "rag_agent guard_search_start request_id=%s query_chars=%d timeout_seconds=%d", req.RequestID, len([]rune(query)), int(timeout.Seconds()))
+	emitRuntimeEvent(out, chatflow.EventStatus, map[string]string{
+		"stage":   "rag_guard_search",
+		"message": "RAG Agent 正在补充检索当前问题...",
+	}, req, traceID)
+
+	searchCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	startedAt := time.Now()
+	results, err := a.flow.Fallback.Search(searchCtx, query)
+	if err != nil {
+		logx.Printf("异常信息", "error", "rag_agent guard_search_failed request_id=%s duration_ms=%d err=%v", req.RequestID, time.Since(startedAt).Milliseconds(), err)
+		return
+	}
+	payload := knowledgeSearchOutput{
+		Summary:  "RAG Agent 已对当前问题执行兜底检索。",
+		Results:  results,
+		Products: productCardsFromKnowledgeResults(results),
+		Sources:  uniqueSources(results),
+	}
+	content, err := json.Marshal(payload)
+	if err != nil {
+		logx.Printf("异常信息", "error", "rag_agent guard_search_marshal_failed request_id=%s results=%d err=%v", req.RequestID, len(results), err)
+		return
+	}
+	if state != nil {
+		state.recordTool(toolKnowledgeSearch, string(content))
+	}
+	emitToolResult(out, toolKnowledgeSearch, string(content), req, traceID)
+	logx.Printf("运行日志", "runtime log", "rag_agent guard_search_success request_id=%s results=%d products=%d sources=%d duration_ms=%d", req.RequestID, len(results), len(payload.Products), len(payload.Sources), time.Since(startedAt).Milliseconds())
+}
+
+func buildRAGGuardQuery(req agentruntime.AgentRequest) string {
+	query := strings.TrimSpace(buildUserQuery(req))
+	if query == "" {
+		query = strings.TrimSpace(req.Message)
+	}
+	if query == "" {
+		return ""
+	}
+	if needsHistoryForRAGQuery(query) {
+		if history := recentHistoryForRAGQuery(req.History, 2); history != "" {
+			query += "\n历史补全：" + history
+		}
+	}
+	query = expandRAGQueryAliases(query)
+	return limitRunes(query, 800)
+}
+
+func needsHistoryForRAGQuery(query string) bool {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return false
+	}
+	phrases := []string{
+		"这款", "这个", "这类", "这些", "它", "它们", "该产品", "该险",
+		"上面", "刚才", "之前", "继续", "再推荐", "对比一下", "哪个更",
+	}
+	for _, phrase := range phrases {
+		if strings.Contains(query, phrase) {
+			return true
+		}
+	}
+	return utf8.RuneCountInString(query) <= 8
+}
+
+func recentHistoryForRAGQuery(history []agentruntime.ChatMessage, maxItems int) string {
+	if maxItems <= 0 || len(history) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, maxItems)
+	for i := len(history) - 1; i >= 0 && len(parts) < maxItems; i-- {
+		role := strings.TrimSpace(history[i].Role)
+		content := strings.TrimSpace(history[i].Content)
+		if content == "" {
+			continue
+		}
+		parts = append(parts, role+"："+limitRunes(content, 160))
+	}
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, "\n")
+}
+
+func expandRAGQueryAliases(query string) string {
+	expanded := query
+	lower := strings.ToLower(query)
+	appendOnce := func(text string) {
+		if !strings.Contains(expanded, text) {
+			expanded += " " + text
+		}
+	}
+	if strings.Contains(query, "慧泽") || strings.Contains(query, "慧择") || strings.Contains(lower, "huize") {
+		appendOnce("慧择")
+		appendOnce("huize")
+		appendOnce("慧择平台")
+	}
+	if strings.Contains(query, "小雨伞") || strings.Contains(lower, "xiaoyusan") {
+		appendOnce("小雨伞")
+		appendOnce("xiaoyusan")
+		appendOnce("小雨伞平台")
+	}
+	if strings.Contains(query, "外购药") || strings.Contains(query, "院外药") || strings.Contains(query, "特药") {
+		appendOnce("外购药")
+		appendOnce("院外药")
+		appendOnce("特药")
+	}
+	if strings.Contains(query, "0免赔") || strings.Contains(query, "无免赔") || strings.Contains(query, "低免赔") {
+		appendOnce("0免赔")
+		appendOnce("无免赔")
+		appendOnce("低免赔")
+	}
+	if strings.Contains(query, "家庭版") || strings.Contains(query, "多人投保") || strings.Contains(query, "家庭单") {
+		appendOnce("家庭版")
+		appendOnce("多人投保")
+		appendOnce("家庭单")
+	}
+	return expanded
+}
+
 type deepRunState struct {
 	maxIterationsExceeded bool
+	knowledgeSearchUsed   bool
 	assistantText         strings.Builder
 	toolObservations      []string
 }
@@ -415,6 +565,9 @@ func (s *deepRunState) recordAssistant(text string) {
 func (s *deepRunState) recordTool(toolName string, content string) {
 	if s == nil {
 		return
+	}
+	if strings.EqualFold(strings.TrimSpace(toolName), toolKnowledgeSearch) {
+		s.knowledgeSearchUsed = true
 	}
 	content = strings.TrimSpace(content)
 	if content == "" {

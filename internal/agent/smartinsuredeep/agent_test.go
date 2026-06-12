@@ -149,6 +149,87 @@ func TestRAGAgentDoesNotRunDirectDetailAction(t *testing.T) {
 	}
 }
 
+func TestRAGAgentRunsGuardSearchWhenModelSkipsKnowledgeTool(t *testing.T) {
+	runner := &fakeADKRunner{events: []*adk.AgentEvent{
+		adk.EventFromMessage(schema.AssistantMessage("我根据上下文先给出推荐。", nil), nil, schema.Assistant, ""),
+	}}
+	fallback := &fakeFallbackSearcher{results: []chatflow.SearchResultItem{
+		{
+			Title:       "慧择测试医疗险 - 产品摘要",
+			URL:         "https://www.huize.com/product/1",
+			Site:        "huize",
+			Snippet:     "适合作为慧择平台医疗险候选。",
+			ProductURL:  "https://www.huize.com/product/1",
+			ProductName: "慧择测试医疗险",
+			Tags:        []string{"医疗险", "慧择"},
+		},
+	}}
+	agent := &Agent{
+		id:          RAGAgentID,
+		runner:      runner,
+		flow:        &chatflow.Flow{Fallback: fallback},
+		toolTimeout: time.Second,
+	}
+
+	events := collect(agent.Run(context.Background(), agentruntime.AgentRequest{
+		RequestID: "req-rag-guard",
+		AgentID:   RAGAgentID,
+		Message:   "推荐慧泽平台的保险商品",
+	}))
+
+	if fallback.calls != 1 {
+		t.Fatalf("fallback calls = %d, want 1", fallback.calls)
+	}
+	if !strings.Contains(fallback.query, "慧择") || !strings.Contains(fallback.query, "huize") {
+		t.Fatalf("fallback query should include platform aliases, got %q", fallback.query)
+	}
+	products := eventItems(events, chatflow.EventProducts)
+	if len(products) != 1 {
+		t.Fatalf("products event items = %#v, want 1 item; events=%#v", products, events)
+	}
+	product, ok := products[0].(map[string]any)
+	if !ok || product["url"] != "https://www.huize.com/product/1" {
+		t.Fatalf("product card url missing: %#v", products[0])
+	}
+	sources := eventItems(events, chatflow.EventSources)
+	if len(sources) != 1 {
+		t.Fatalf("sources event items = %#v, want 1 item; events=%#v", sources, events)
+	}
+	if last := events[len(events)-1]; last.Name != chatflow.EventDone {
+		t.Fatalf("last event = %#v, want done", last)
+	}
+}
+
+func TestRAGAgentSkipsGuardSearchWhenKnowledgeToolAlreadyUsed(t *testing.T) {
+	knowledgePayload := `{"summary":"ok","products":[{"id":"rag_p1","name":"测试医疗险","url":"https://example.com/p"}]}`
+	runner := &fakeADKRunner{events: []*adk.AgentEvent{
+		adk.EventFromMessage(schema.ToolMessage(knowledgePayload, "call-knowledge", schema.WithToolName(toolKnowledgeSearch)), nil, schema.Tool, toolKnowledgeSearch),
+	}}
+	fallback := &fakeFallbackSearcher{results: []chatflow.SearchResultItem{
+		{Title: "不应触发", URL: "https://example.com/unused", ProductURL: "https://example.com/unused"},
+	}}
+	agent := &Agent{
+		id:          RAGAgentID,
+		runner:      runner,
+		flow:        &chatflow.Flow{Fallback: fallback},
+		toolTimeout: time.Second,
+	}
+
+	events := collect(agent.Run(context.Background(), agentruntime.AgentRequest{
+		RequestID: "req-rag-no-guard",
+		AgentID:   RAGAgentID,
+		Message:   "推荐慧择平台的保险商品",
+	}))
+
+	if fallback.calls != 0 {
+		t.Fatalf("fallback calls = %d, want 0", fallback.calls)
+	}
+	products := eventItems(events, chatflow.EventProducts)
+	if len(products) != 1 {
+		t.Fatalf("products event items = %#v, want 1 item; events=%#v", products, events)
+	}
+}
+
 func TestAgentFinalizesWhenMaxIterationsExceeded(t *testing.T) {
 	runner := &fakeADKRunner{events: []*adk.AgentEvent{
 		adk.EventFromMessage(schema.ToolMessage(`{"summary":"已检索到百万医疗险资料"}`, "call-1", schema.WithToolName(toolKnowledgeSearch)), nil, schema.Tool, toolKnowledgeSearch),
@@ -208,6 +289,22 @@ func (r *fakeDetailRunner) Run(_ context.Context, req chatflow.DetailRequest) <-
 	}
 	close(ch)
 	return ch
+}
+
+type fakeFallbackSearcher struct {
+	query   string
+	calls   int
+	results []chatflow.SearchResultItem
+	err     error
+}
+
+func (s *fakeFallbackSearcher) Search(_ context.Context, query string) ([]chatflow.SearchResultItem, error) {
+	s.calls++
+	s.query = query
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.results, nil
 }
 
 type fakeFinalModel struct {
