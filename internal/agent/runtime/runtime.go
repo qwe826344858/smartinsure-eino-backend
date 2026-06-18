@@ -42,6 +42,8 @@ type AgentRequest struct {
 	History []ChatMessage
 	// TraceDisabled=true 时不生成 trace_id。
 	TraceDisabled bool
+	// IncludeThink=true 时允许把模型 think 内容作为调试状态返回；默认只写日志。
+	IncludeThink bool
 }
 
 // ChatMessage 是 Runtime 传给 Agent 的历史消息结构。

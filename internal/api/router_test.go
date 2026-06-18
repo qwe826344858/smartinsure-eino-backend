@@ -209,6 +209,24 @@ func TestAgentDeepChatForcesDeepAgentID(t *testing.T) {
 	}
 }
 
+func TestAgentChatPassesIncludeThinkFlag(t *testing.T) {
+	setAgentRouteTestEnv(t)
+	server := newServerWithFakeAgent(t, apiFakeAgent{id: smartinsuredeep.DefaultID})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/agent/deep-chat", strings.NewReader(`{"message":"百万医疗险怎么选？","include_think":true,"requestId":"rid-think"}`))
+	request.Header.Set("Content-Type", "application/json")
+
+	server.agentDeepChat(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, `"include_think":true`) {
+		t.Fatalf("include_think flag was not passed to agent: %s", body)
+	}
+}
+
 func TestRAGAgentChatForcesRAGAgentID(t *testing.T) {
 	setAgentRouteTestEnv(t)
 	server := newServerWithFakeAgent(t, apiFakeAgent{id: smartinsuredeep.RAGAgentID})
@@ -320,7 +338,7 @@ func (a apiFakeAgent) Run(_ context.Context, req agentruntime.AgentRequest) <-ch
 	ch := make(chan agentruntime.AgentEvent, 4)
 	ch <- agentruntime.AgentEvent{
 		Name:      chatflow.EventStatus,
-		Data:      agentruntime.AddTraceFields(map[string]string{"stage": "reasoning", "message": "fake deep"}, req.RequestID, req.AgentID, traceID),
+		Data:      agentruntime.AddTraceFields(map[string]any{"stage": "reasoning", "message": "fake deep", "include_think": req.IncludeThink}, req.RequestID, req.AgentID, traceID),
 		RequestID: req.RequestID,
 		AgentID:   req.AgentID,
 		TraceID:   traceID,

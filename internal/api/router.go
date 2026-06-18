@@ -101,19 +101,21 @@ type ProviderInfo struct {
 }
 
 type chatRequest struct {
-	Message        string         `json:"message"`
-	SessionID      string         `json:"sessionId"`
-	ChatSessionID  string         `json:"chat_session_id"`
-	AnonymousID    string         `json:"anonymous_id"`
-	RequestID      string         `json:"requestId"`
-	Action         string         `json:"action"`
-	ProductURL     string         `json:"productUrl"`
-	ProductURLAlt  string         `json:"product_url"`
-	ProductName    string         `json:"productName"`
-	ProductNameAlt string         `json:"product_name"`
-	AgentID        string         `json:"agent_id"`
-	Stream         bool           `json:"stream"`
-	Metadata       map[string]any `json:"metadata"`
+	Message         string         `json:"message"`
+	SessionID       string         `json:"sessionId"`
+	ChatSessionID   string         `json:"chat_session_id"`
+	AnonymousID     string         `json:"anonymous_id"`
+	RequestID       string         `json:"requestId"`
+	Action          string         `json:"action"`
+	ProductURL      string         `json:"productUrl"`
+	ProductURLAlt   string         `json:"product_url"`
+	ProductName     string         `json:"productName"`
+	ProductNameAlt  string         `json:"product_name"`
+	AgentID         string         `json:"agent_id"`
+	Stream          bool           `json:"stream"`
+	IncludeThink    bool           `json:"include_think"`
+	IncludeThinkAlt bool           `json:"includeThink"`
+	Metadata        map[string]any `json:"metadata"`
 }
 
 var suggestions = []string{

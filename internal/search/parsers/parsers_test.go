@@ -4,10 +4,12 @@ import "testing"
 
 func TestParsePriceFromText(t *testing.T) {
 	cases := map[string]string{
-		"年交 258元/年 起": "258元/年",
-		"保费 ¥99.5":    "¥99.5",
-		"最低 66元起":     "66元起",
-		"首月 0 元":      "首月0元",
+		"年交 258元/年 起":  "258元/年",
+		"保费 323元/年起":   "323元/年起",
+		"最低 13.05元/月起": "13.05元/月起",
+		"保费 ¥99.5":     "¥99.5",
+		"最低 66元起":      "66元起",
+		"首月 0 元":       "首月0元",
 	}
 	for input, want := range cases {
 		if got := ParsePriceFromText(input); got != want {

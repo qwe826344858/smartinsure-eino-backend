@@ -18,6 +18,8 @@ func TestProductDetailSchemaStatements(t *testing.T) {
 	}
 	for _, want := range []string{
 		"CREATE TABLE IF NOT EXISTS product_details",
+		"price VARCHAR(64) NOT NULL DEFAULT ''",
+		"price_label VARCHAR(64) NOT NULL DEFAULT ''",
 		"detail_json JSON NOT NULL",
 		"rag_ingest_status VARCHAR(20) NOT NULL DEFAULT 'pending'",
 		"rag_ingest_source_hash VARCHAR(64) NOT NULL DEFAULT ''",
@@ -55,6 +57,8 @@ func TestBuildProductDetailUpsertStatementMarshalsDetailJSON(t *testing.T) {
 		Detail: schema.ProductDetail{
 			ProductName: "测试百万医疗险",
 			ProductURL:  "HTTPS://Example.COM/Product/1/?utm_source=ad&id=9#frag",
+			Price:       "323元/年起",
+			PriceLabel:  "323元/年起",
 			Duties: []schema.DutyItem{{
 				Name:        "一般医疗保险金",
 				Coverage:    "300万",
@@ -92,23 +96,26 @@ func TestBuildProductDetailUpsertStatementMarshalsDetailJSON(t *testing.T) {
 	if !strings.Contains(stmt.Query, "ON DUPLICATE KEY UPDATE") {
 		t.Fatalf("upsert SQL missing duplicate update:\n%s", stmt.Query)
 	}
-	if len(stmt.Args) != 18 {
-		t.Fatalf("len(args) = %d, want 18", len(stmt.Args))
+	if len(stmt.Args) != 20 {
+		t.Fatalf("len(args) = %d, want 20", len(stmt.Args))
 	}
-	if stmt.Args[0] != record.ProductKey || stmt.Args[3] != wantURL || stmt.Args[16] != now || stmt.Args[17] != now {
+	if stmt.Args[0] != record.ProductKey || stmt.Args[3] != wantURL || stmt.Args[18] != now || stmt.Args[19] != now {
 		t.Fatalf("unexpected upsert args: %#v", stmt.Args)
 	}
-	if stmt.Args[11] != RAGIngestStatusPending || stmt.Args[12] != "" {
-		t.Fatalf("unexpected rag ingest args: %#v", stmt.Args[11:15])
+	if stmt.Args[4] != "323元/年起" || stmt.Args[5] != "323元/年起" {
+		t.Fatalf("unexpected price args: %#v", stmt.Args[4:6])
 	}
-	if stmt.Args[15] != expiresAt {
-		t.Fatalf("expires arg = %#v, want %v", stmt.Args[15], expiresAt)
+	if stmt.Args[13] != RAGIngestStatusPending || stmt.Args[14] != "" {
+		t.Fatalf("unexpected rag ingest args: %#v", stmt.Args[13:17])
+	}
+	if stmt.Args[17] != expiresAt {
+		t.Fatalf("expires arg = %#v, want %v", stmt.Args[17], expiresAt)
 	}
 
 	var detail schema.ProductDetail
-	rawJSON, ok := stmt.Args[4].(string)
+	rawJSON, ok := stmt.Args[6].(string)
 	if !ok {
-		t.Fatalf("detail_json arg type = %T, want string", stmt.Args[4])
+		t.Fatalf("detail_json arg type = %T, want string", stmt.Args[6])
 	}
 	if err := json.Unmarshal([]byte(rawJSON), &detail); err != nil {
 		t.Fatalf("detail_json unmarshal error = %v", err)
@@ -118,6 +125,9 @@ func TestBuildProductDetailUpsertStatementMarshalsDetailJSON(t *testing.T) {
 	}
 	if detail.Platform != ProductPlatformUnknown {
 		t.Fatalf("detail.Platform = %q, want unknown", detail.Platform)
+	}
+	if detail.Price != "323元/年起" || detail.PriceLabel != "323元/年起" {
+		t.Fatalf("detail price = %q/%q", detail.Price, detail.PriceLabel)
 	}
 	if len(detail.Duties) != 1 || detail.Duties[0].Name != "一般医疗保险金" {
 		t.Fatalf("detail.Duties = %#v", detail.Duties)
@@ -190,6 +200,31 @@ func TestBuildProductDetailSourceUpsertStatement(t *testing.T) {
 	}
 }
 
+func TestBuildProductDetailPriceUpdateStatement(t *testing.T) {
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	stmt := buildProductDetailPriceUpdateStatement("huize:url:abc", "323元/年起", "323元/年起", now)
+	for _, want := range []string{
+		"UPDATE product_details",
+		"price = ?",
+		"price_label = ?",
+		"JSON_SET(detail_json",
+		"WHERE product_key = ?",
+	} {
+		if !strings.Contains(stmt.Query, want) {
+			t.Fatalf("price update SQL missing %q:\n%s", want, stmt.Query)
+		}
+	}
+	wantArgs := []any{"323元/年起", "323元/年起", "323元/年起", "323元/年起", now, "huize:url:abc"}
+	if len(stmt.Args) != len(wantArgs) {
+		t.Fatalf("len(args) = %d, want %d: %#v", len(stmt.Args), len(wantArgs), stmt.Args)
+	}
+	for i, want := range wantArgs {
+		if stmt.Args[i] != want {
+			t.Fatalf("arg[%d] = %#v, want %#v", i, stmt.Args[i], want)
+		}
+	}
+}
+
 func TestBuildProductDetailListActiveStatement(t *testing.T) {
 	after := time.Date(2026, 6, 10, 8, 0, 0, 0, time.UTC)
 	now := after.Add(time.Hour)
@@ -237,6 +272,8 @@ func TestScanStoredProductDetailDecodesJSONAndFillsDefaults(t *testing.T) {
 		ProductPlatformUnknown,
 		"测试百万医疗险",
 		"https://example.com/product",
+		"188元/年起",
+		"188元/年起",
 		detailJSON,
 		"source-hash",
 		"detail-v1",
@@ -261,6 +298,9 @@ func TestScanStoredProductDetailDecodesJSONAndFillsDefaults(t *testing.T) {
 	}
 	if record.Detail.ProductURL != record.CanonicalURL {
 		t.Fatalf("Detail.ProductURL = %q, want %q", record.Detail.ProductURL, record.CanonicalURL)
+	}
+	if record.Detail.Price != "188元/年起" || record.Detail.PriceLabel != "188元/年起" {
+		t.Fatalf("Detail price = %q/%q", record.Detail.Price, record.Detail.PriceLabel)
 	}
 	if record.Detail.Platform != record.Platform {
 		t.Fatalf("Detail.Platform = %q, want %q", record.Detail.Platform, record.Platform)
@@ -290,6 +330,8 @@ func TestScanStoredProductDetailWithSource(t *testing.T) {
 		ProductPlatformUnknown,
 		"测试百万医疗险",
 		"https://example.com/product",
+		"288元/年起",
+		"288元/年起",
 		detailJSON,
 		"source-hash",
 		"detail-v1",

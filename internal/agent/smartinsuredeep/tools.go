@@ -33,11 +33,16 @@ type insuranceTools struct {
 	search chatflow.ProductSearcher
 	// knowledge 复用 fallback/RAG 知识检索服务，返回来源和摘要。
 	knowledge chatflow.FallbackSearcher
+	// priceLookup 用于把 RAG 召回结果补齐 MySQL 中的产品价格。
+	priceLookup chatflow.ProductPriceLookup
 	// detail 复用产品详情 runner，解析页面并返回 detail_items。
 	detail chatflow.DetailRunner
 	// toolTimeout 是 DeepAgent 自己选择工具时的单次调用超时。
 	// 直达 product_detail 请求在 agent.go 中旁路到 chatflow，不受这个通用工具超时限制。
 	toolTimeout time.Duration
+	// ragOnly 表示当前工具集只服务 RAG Agent。默认 DeepAgent 的产品卡应来自 product_search，
+	// 避免 knowledge_search 的无价格 RAG 召回结果被前端当作推荐产品卡展示。
+	ragOnly bool
 }
 
 // productSearchInput 是 product_search 工具暴露给模型的 JSON 入参。
@@ -111,8 +116,10 @@ func newToolsWithMode(flow *chatflow.Flow, timeout time.Duration, ragOnly bool) 
 	tools := insuranceTools{
 		search:      flow.Search,
 		knowledge:   flow.Fallback,
+		priceLookup: flow.Prices,
 		detail:      flow.Detail,
 		toolTimeout: timeout,
+		ragOnly:     ragOnly,
 	}
 	knowledgeSearch, err := toolutils.InferTool[knowledgeSearchInput, knowledgeSearchOutput](
 		toolKnowledgeSearch,
@@ -207,13 +214,16 @@ func (t insuranceTools) knowledgeSearch(ctx context.Context, input knowledgeSear
 		return knowledgeSearchOutput{Summary: err.Error(), Error: err.Error()}, nil
 	}
 	logx.Printf("运行日志", "runtime log", "deep_agent tool_success tool=%s results=%d sources=%d duration_ms=%d", toolKnowledgeSearch, len(results), len(uniqueSources(results)), time.Since(startedAt).Milliseconds())
-	return knowledgeSearchOutput{
-		Summary:  "知识检索返回来源。",
-		Results:  results,
-		Products: productCardsFromKnowledgeResults(results),
+	out := knowledgeSearchOutput{
+		Summary: "知识检索返回来源。",
+		Results: results,
 		// Sources 单独返回，方便 emitToolResult 映射为 SSE sources 事件。
 		Sources: uniqueSources(results),
-	}, nil
+	}
+	if t.ragOnly {
+		out.Products = productCardsFromKnowledgeResults(ctx, results, t.priceLookup)
+	}
+	return out, nil
 }
 
 // productDetail 执行 DeepAgent 主动选择的详情解析工具。
@@ -300,7 +310,7 @@ func uniqueSources(results []chatflow.SearchResultItem) []chatflow.SourceItem {
 	return sources
 }
 
-func productCardsFromKnowledgeResults(results []chatflow.SearchResultItem) []chatflow.ProductCard {
+func productCardsFromKnowledgeResults(ctx context.Context, results []chatflow.SearchResultItem, priceLookup chatflow.ProductPriceLookup) []chatflow.ProductCard {
 	seen := map[string]struct{}{}
 	products := make([]chatflow.ProductCard, 0, len(results))
 	for _, result := range results {
@@ -318,12 +328,13 @@ func productCardsFromKnowledgeResults(results []chatflow.SearchResultItem) []cha
 		if len(tags) == 0 && strings.TrimSpace(result.Site) != "" {
 			tags = []string{strings.TrimSpace(result.Site)}
 		}
+		price, priceLabel := knowledgeProductPrice(ctx, priceLookup, productURL)
 		products = append(products, chatflow.ProductCard{
 			ID:         "rag_" + logHash(key),
 			Name:       firstNonEmpty(productName, result.Title),
 			Company:    strings.TrimSpace(result.Site),
-			Price:      nil,
-			PriceLabel: "详见产品页",
+			Price:      stringPtrOrNil(price),
+			PriceLabel: firstNonEmpty(priceLabel, "详见产品页"),
 			Tags:       tags,
 			URL:        productURL,
 			Platform:   result.Site,
@@ -331,6 +342,29 @@ func productCardsFromKnowledgeResults(results []chatflow.SearchResultItem) []cha
 		})
 	}
 	return products
+}
+
+func knowledgeProductPrice(ctx context.Context, priceLookup chatflow.ProductPriceLookup, productURL string) (string, string) {
+	if priceLookup == nil || strings.TrimSpace(productURL) == "" {
+		return "", ""
+	}
+	price, ok, err := priceLookup.LookupProductPrice(ctx, productURL)
+	if err != nil {
+		logx.Printf("运行日志", "runtime log", "deep_agent price_lookup_failed host=%s url_hash=%s err=%v", logURLHost(productURL), logHash(productURL), err)
+		return "", ""
+	}
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(price.Price), strings.TrimSpace(price.PriceLabel)
+}
+
+func stringPtrOrNil(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func productNameFromTitle(title string) string {

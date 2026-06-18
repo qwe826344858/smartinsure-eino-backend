@@ -227,6 +227,7 @@ func (a *Agent) Run(ctx context.Context, req agentruntime.AgentRequest) <-chan a
 				break
 			}
 		}
+		a.flushThinkFilter(out, req, traceID, state)
 		a.emitRAGGuardSearchIfNeeded(ctx, out, req, traceID, state)
 		if state.maxIterationsExceeded {
 			a.emitFinalAnswerAfterMaxIterations(ctx, out, req, traceID, state)
@@ -384,21 +385,13 @@ func (a *Agent) emitADKMessage(out chan<- agentruntime.AgentEvent, role schema.R
 			}, req, traceID)
 		}
 		if msg.Content != "" {
-			// Assistant 普通文本直接作为 delta 透传给前端。
-			logx.Printf("运行日志", "runtime log", "deep_agent assistant_delta request_id=%s chars=%d", req.RequestID, len([]rune(msg.Content)))
-			if state != nil {
-				state.recordAssistant(msg.Content)
-			}
-			emitRuntimeEvent(out, chatflow.EventDelta, map[string]string{"text": msg.Content}, req, traceID)
+			// Assistant 普通文本需要先剥离 <think>，避免内部推理进入前端回答。
+			a.emitAssistantContent(out, "assistant", msg.Content, req, traceID, state)
 		}
 	default:
 		if msg.Content != "" {
-			// 非标准 role 的文本也以 delta 输出，避免模型输出被吞掉。
-			logx.Printf("运行日志", "runtime log", "deep_agent message_delta request_id=%s role=%s chars=%d", req.RequestID, role, len([]rune(msg.Content)))
-			if state != nil {
-				state.recordAssistant(msg.Content)
-			}
-			emitRuntimeEvent(out, chatflow.EventDelta, map[string]string{"text": msg.Content}, req, traceID)
+			// 非标准 role 的文本也以 delta 输出，但同样不能把 <think> 透给前端。
+			a.emitAssistantContent(out, string(role), msg.Content, req, traceID, state)
 		}
 	}
 }
@@ -440,7 +433,7 @@ func (a *Agent) emitRAGGuardSearchIfNeeded(ctx context.Context, out chan<- agent
 	payload := knowledgeSearchOutput{
 		Summary:  "RAG Agent 已对当前问题执行兜底检索。",
 		Results:  results,
-		Products: productCardsFromKnowledgeResults(results),
+		Products: productCardsFromKnowledgeResults(searchCtx, results, a.flow.Prices),
 		Sources:  uniqueSources(results),
 	}
 	content, err := json.Marshal(payload)
@@ -549,6 +542,27 @@ type deepRunState struct {
 	knowledgeSearchUsed   bool
 	assistantText         strings.Builder
 	toolObservations      []string
+	thinkFilter           *deepThinkStreamFilter
+}
+
+func (s *deepRunState) filterAssistant(text string) (string, []string) {
+	if s == nil {
+		filter := newDeepThinkStreamFilter()
+		visible, thinks := filter.feed(text)
+		tail, tailThinks := filter.flush()
+		return visible + tail, append(thinks, tailThinks...)
+	}
+	if s.thinkFilter == nil {
+		s.thinkFilter = newDeepThinkStreamFilter()
+	}
+	return s.thinkFilter.feed(text)
+}
+
+func (s *deepRunState) flushAssistantFilter() (string, []string) {
+	if s == nil || s.thinkFilter == nil {
+		return "", nil
+	}
+	return s.thinkFilter.flush()
 }
 
 func (s *deepRunState) recordAssistant(text string) {
@@ -596,6 +610,146 @@ func (s *deepRunState) toolContext() string {
 	return limitRunes(strings.Join(s.toolObservations, "\n\n"), 7000)
 }
 
+func (a *Agent) emitAssistantContent(out chan<- agentruntime.AgentEvent, source string, content string, req agentruntime.AgentRequest, traceID string, state *deepRunState) {
+	visible, thinks := state.filterAssistant(content)
+	a.emitThinkDiagnostics(out, thinks, req, traceID)
+	if strings.TrimSpace(visible) == "" {
+		return
+	}
+	logx.Printf("运行日志", "runtime log", "deep_agent assistant_delta request_id=%s source=%s chars=%d", req.RequestID, source, len([]rune(visible)))
+	if state != nil {
+		state.recordAssistant(visible)
+	}
+	emitRuntimeEvent(out, chatflow.EventDelta, map[string]string{"text": visible}, req, traceID)
+}
+
+func (a *Agent) flushThinkFilter(out chan<- agentruntime.AgentEvent, req agentruntime.AgentRequest, traceID string, state *deepRunState) {
+	visible, thinks := state.flushAssistantFilter()
+	a.emitThinkDiagnostics(out, thinks, req, traceID)
+	if strings.TrimSpace(visible) == "" {
+		return
+	}
+	logx.Printf("运行日志", "runtime log", "deep_agent assistant_delta request_id=%s source=think_filter_flush chars=%d", req.RequestID, len([]rune(visible)))
+	if state != nil {
+		state.recordAssistant(visible)
+	}
+	emitRuntimeEvent(out, chatflow.EventDelta, map[string]string{"text": visible}, req, traceID)
+}
+
+func (a *Agent) emitThinkDiagnostics(out chan<- agentruntime.AgentEvent, thinks []string, req agentruntime.AgentRequest, traceID string) {
+	for _, think := range thinks {
+		think = strings.TrimSpace(think)
+		if think == "" {
+			continue
+		}
+		limited := limitRunes(think, 1200)
+		logx.Printf("运行日志", "runtime log", "deep_agent think request_id=%s agent_id=%s trace_id=%s chars=%d content=%q", req.RequestID, req.AgentID, traceID, len([]rune(think)), limited)
+		if !req.IncludeThink {
+			continue
+		}
+		emitRuntimeEvent(out, chatflow.EventStatus, map[string]string{
+			"stage":   "thinking",
+			"message": "DeepAgent think 输出已记录。",
+			"think":   limited,
+		}, req, traceID)
+	}
+}
+
+type deepThinkStreamFilter struct {
+	inThink bool
+	pending string
+	think   strings.Builder
+}
+
+func newDeepThinkStreamFilter() *deepThinkStreamFilter {
+	return &deepThinkStreamFilter{}
+}
+
+func (f *deepThinkStreamFilter) feed(text string) (string, []string) {
+	if f == nil || text == "" {
+		return text, nil
+	}
+	input := f.pending + text
+	f.pending = ""
+	var visible strings.Builder
+	var thinks []string
+	for input != "" {
+		if f.inThink {
+			end := strings.Index(input, "</think>")
+			if end >= 0 {
+				f.think.WriteString(input[:end])
+				if think := strings.TrimSpace(f.think.String()); think != "" {
+					thinks = append(thinks, think)
+				}
+				f.think.Reset()
+				f.inThink = false
+				input = input[end+len("</think>"):]
+				continue
+			}
+			keep := tagPrefixSuffixLen(input, "</think>")
+			if keep > 0 {
+				f.think.WriteString(input[:len(input)-keep])
+				f.pending = input[len(input)-keep:]
+				break
+			}
+			f.think.WriteString(input)
+			break
+		}
+
+		start := strings.Index(input, "<think>")
+		if start >= 0 {
+			visible.WriteString(input[:start])
+			f.inThink = true
+			input = input[start+len("<think>"):]
+			continue
+		}
+		keep := tagPrefixSuffixLen(input, "<think>")
+		if keep > 0 {
+			visible.WriteString(input[:len(input)-keep])
+			f.pending = input[len(input)-keep:]
+			break
+		}
+		visible.WriteString(input)
+		break
+	}
+	return visible.String(), thinks
+}
+
+func (f *deepThinkStreamFilter) flush() (string, []string) {
+	if f == nil {
+		return "", nil
+	}
+	var visible string
+	if f.pending != "" {
+		if f.inThink {
+			f.think.WriteString(f.pending)
+		} else {
+			visible = f.pending
+		}
+		f.pending = ""
+	}
+	var thinks []string
+	if think := strings.TrimSpace(f.think.String()); think != "" {
+		thinks = append(thinks, think)
+	}
+	f.think.Reset()
+	f.inThink = false
+	return visible, thinks
+}
+
+func tagPrefixSuffixLen(text string, tag string) int {
+	max := len(tag) - 1
+	if len(text) < max {
+		max = len(text)
+	}
+	for size := max; size > 0; size-- {
+		if strings.HasSuffix(text, tag[:size]) {
+			return size
+		}
+	}
+	return 0
+}
+
 func (a *Agent) emitFinalAnswerAfterMaxIterations(ctx context.Context, out chan<- agentruntime.AgentEvent, req agentruntime.AgentRequest, traceID string, state *deepRunState) {
 	if a == nil || a.finalModel == nil {
 		logx.Printf("异常信息", "error", "deep_agent final_answer_model_missing request_id=%s", req.RequestID)
@@ -624,7 +778,8 @@ func (a *Agent) emitFinalAnswerAfterMaxIterations(ctx context.Context, out chan<
 		return
 	}
 	logx.Printf("运行日志", "runtime log", "deep_agent final_answer_success request_id=%s chars=%d duration_ms=%d", req.RequestID, len([]rune(text)), time.Since(startedAt).Milliseconds())
-	emitRuntimeEvent(out, chatflow.EventDelta, map[string]string{"text": text}, req, traceID)
+	a.emitAssistantContent(out, "final_answer", text, req, traceID, state)
+	a.flushThinkFilter(out, req, traceID, state)
 }
 
 func buildMaxIterationFinalMessages(req agentruntime.AgentRequest, state *deepRunState, instruction string) []*schema.Message {

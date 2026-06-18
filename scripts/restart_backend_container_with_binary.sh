@@ -79,6 +79,13 @@ append_env_override "RAG_CONFIG_PATH"
 append_env_override "LOG_CONFIG_PATH"
 append_env_override "LOG_FILE_PATH"
 append_env_override "LOG_TO_CONSOLE"
+append_env_override "MYSQL_DSN"
+append_env_override "REDIS_URL"
+append_env_override "DATABASE_URL"
+
+for key in $(compgen -e | awk '/^(EMBEDDING_|PRODUCT_DETAIL_RAG_|RAG_SEARCH_)/'); do
+	append_env_override "${key}"
+done
 
 old_container=""
 if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then

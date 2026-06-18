@@ -16,7 +16,7 @@ import (
 )
 
 func TestAgentMapsADKEventsToRuntimeEvents(t *testing.T) {
-	productPayload := `{"summary":"ok","products":[{"id":"p1","name":"测试医疗险","company":"测试保险","url":"https://example.com/p"}]}`
+	productPayload := `{"summary":"ok","products":[{"id":"p1","name":"测试医疗险","company":"测试保险","price":"588元/年起","price_label":"588元/年起","url":"https://example.com/p"}]}`
 	stream := schema.StreamReaderFromArray([]*schema.Message{
 		schema.AssistantMessage("第一段", nil),
 		schema.AssistantMessage("第二段", nil),
@@ -39,6 +39,14 @@ func TestAgentMapsADKEventsToRuntimeEvents(t *testing.T) {
 	if !hasEvent(events, "products") {
 		t.Fatalf("products event missing: %#v", events)
 	}
+	products := eventItems(events, chatflow.EventProducts)
+	if len(products) != 1 {
+		t.Fatalf("products event items = %#v, want 1 item; events=%#v", products, events)
+	}
+	product, ok := products[0].(map[string]any)
+	if !ok || product["price"] != "588元/年起" || product["price_label"] != "588元/年起" {
+		t.Fatalf("product price fields missing: %#v", products[0])
+	}
 	if got := joinedDelta(events); got != "第一段第二段" {
 		t.Fatalf("delta text = %q", got)
 	}
@@ -48,6 +56,57 @@ func TestAgentMapsADKEventsToRuntimeEvents(t *testing.T) {
 	data, ok := events[0].Data.(map[string]any)
 	if !ok || data["agent_id"] != DefaultID || data["requestId"] != "req-deep" || data["trace_id"] == "" {
 		t.Fatalf("trace fields missing: %#v", events[0].Data)
+	}
+}
+
+func TestAgentFiltersThinkDeltaByDefault(t *testing.T) {
+	stream := schema.StreamReaderFromArray([]*schema.Message{
+		schema.AssistantMessage("<thi", nil),
+		schema.AssistantMessage("nk>内部", nil),
+		schema.AssistantMessage("推理</thi", nil),
+		schema.AssistantMessage("nk>可见", nil),
+		schema.AssistantMessage("答案", nil),
+	})
+	runner := &fakeADKRunner{events: []*adk.AgentEvent{
+		adk.EventFromMessage(nil, stream, schema.Assistant, ""),
+	}}
+	agent := &Agent{id: DefaultID, runner: runner}
+
+	events := collect(agent.Run(context.Background(), agentruntime.AgentRequest{
+		RequestID: "req-think-default",
+		AgentID:   DefaultID,
+		Message:   "百万医疗险怎么选",
+	}))
+
+	if got := joinedDelta(events); got != "可见答案" {
+		t.Fatalf("delta text = %q, want 可见答案", got)
+	}
+	payload := fmt.Sprintf("%#v", events)
+	for _, leaked := range []string{"内部", "推理", "<think>", "</think>"} {
+		if strings.Contains(payload, leaked) {
+			t.Fatalf("think content leaked to SSE payload: %s", payload)
+		}
+	}
+}
+
+func TestAgentCanEmitThinkDebugWhenRequested(t *testing.T) {
+	runner := &fakeADKRunner{events: []*adk.AgentEvent{
+		adk.EventFromMessage(schema.AssistantMessage("<think>内部推理</think>可见答案", nil), nil, schema.Assistant, ""),
+	}}
+	agent := &Agent{id: DefaultID, runner: runner}
+
+	events := collect(agent.Run(context.Background(), agentruntime.AgentRequest{
+		RequestID:    "req-think-debug",
+		AgentID:      DefaultID,
+		Message:      "百万医疗险怎么选",
+		IncludeThink: true,
+	}))
+
+	if got := joinedDelta(events); got != "可见答案" {
+		t.Fatalf("delta text = %q, want 可见答案", got)
+	}
+	if !hasThinkStatus(events, "内部推理") {
+		t.Fatalf("think debug status missing: %#v", events)
 	}
 }
 
@@ -79,6 +138,93 @@ func TestAgentMapsKnowledgeSearchProductsToRuntimeEvents(t *testing.T) {
 	source, ok := sources[0].(map[string]any)
 	if !ok || source["product_url"] != "https://example.com/p" {
 		t.Fatalf("source product_url missing: %#v", sources[0])
+	}
+}
+
+func TestDefaultDeepAgentDoesNotEmitKnowledgeSearchProducts(t *testing.T) {
+	knowledgePayload := `{"summary":"ok","sources":[{"title":"测试医疗险","url":"https://example.com/p","site":"huize","product_url":"https://example.com/p"}],"products":[{"id":"rag_p1","name":"测试医疗险","price_label":"详见产品页","url":"https://example.com/p","platform":"huize","brief":"外购药责任"}]}`
+	runner := &fakeADKRunner{events: []*adk.AgentEvent{
+		adk.EventFromMessage(schema.ToolMessage(knowledgePayload, "call-knowledge", schema.WithToolName(toolKnowledgeSearch)), nil, schema.Tool, toolKnowledgeSearch),
+	}}
+	agent := &Agent{id: DefaultID, runner: runner}
+
+	events := collect(agent.Run(context.Background(), agentruntime.AgentRequest{
+		RequestID: "req-default-knowledge",
+		AgentID:   DefaultID,
+		Message:   "百万医疗险怎么选",
+	}))
+
+	if products := eventItems(events, chatflow.EventProducts); len(products) != 0 {
+		t.Fatalf("default DeepAgent should not emit RAG products without price: %#v; events=%#v", products, events)
+	}
+	if sources := eventItems(events, chatflow.EventSources); len(sources) != 1 {
+		t.Fatalf("sources event items = %#v, want 1 item; events=%#v", sources, events)
+	}
+}
+
+func TestKnowledgeSearchOutputProductsOnlyForRAGTools(t *testing.T) {
+	results := []chatflow.SearchResultItem{{
+		Title:       "测试医疗险",
+		URL:         "https://example.com/p",
+		Site:        "huize",
+		ProductURL:  "https://example.com/p",
+		ProductName: "测试医疗险",
+	}}
+	normalTools := insuranceTools{
+		knowledge:   &fakeFallbackSearcher{results: results},
+		toolTimeout: time.Second,
+	}
+	normalOutput, err := normalTools.knowledgeSearch(context.Background(), knowledgeSearchInput{Query: "测试医疗险"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(normalOutput.Products) != 0 {
+		t.Fatalf("normal knowledge_search products = %#v, want none", normalOutput.Products)
+	}
+
+	ragTools := insuranceTools{
+		knowledge:   &fakeFallbackSearcher{results: results},
+		toolTimeout: time.Second,
+		ragOnly:     true,
+	}
+	ragOutput, err := ragTools.knowledgeSearch(context.Background(), knowledgeSearchInput{Query: "测试医疗险"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ragOutput.Products) != 1 {
+		t.Fatalf("RAG knowledge_search products = %#v, want 1 item", ragOutput.Products)
+	}
+}
+
+func TestRAGKnowledgeSearchProductsUsePriceLookup(t *testing.T) {
+	results := []chatflow.SearchResultItem{{
+		Title:       "测试医疗险",
+		URL:         "https://example.com/p",
+		Site:        "huize",
+		ProductURL:  "https://example.com/p",
+		ProductName: "测试医疗险",
+	}}
+	tools := insuranceTools{
+		knowledge:   &fakeFallbackSearcher{results: results},
+		toolTimeout: time.Second,
+		ragOnly:     true,
+		priceLookup: fakeProductPriceLookup{
+			byURL: map[string]chatflow.ProductPrice{
+				"https://example.com/p": {Price: "588元/年起", PriceLabel: "588元/年起"},
+			},
+		},
+	}
+
+	output, err := tools.knowledgeSearch(context.Background(), knowledgeSearchInput{Query: "测试医疗险"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output.Products) != 1 {
+		t.Fatalf("products = %#v, want 1 item", output.Products)
+	}
+	product := output.Products[0]
+	if product.Price == nil || *product.Price != "588元/年起" || product.PriceLabel != "588元/年起" {
+		t.Fatalf("product price = %#v/%q, want 588元/年起", product.Price, product.PriceLabel)
 	}
 }
 
@@ -165,9 +311,16 @@ func TestRAGAgentRunsGuardSearchWhenModelSkipsKnowledgeTool(t *testing.T) {
 		},
 	}}
 	agent := &Agent{
-		id:          RAGAgentID,
-		runner:      runner,
-		flow:        &chatflow.Flow{Fallback: fallback},
+		id:     RAGAgentID,
+		runner: runner,
+		flow: &chatflow.Flow{
+			Fallback: fallback,
+			Prices: fakeProductPriceLookup{
+				byURL: map[string]chatflow.ProductPrice{
+					"https://www.huize.com/product/1": {Price: "323元/年起", PriceLabel: "323元/年起"},
+				},
+			},
+		},
 		toolTimeout: time.Second,
 	}
 
@@ -190,6 +343,9 @@ func TestRAGAgentRunsGuardSearchWhenModelSkipsKnowledgeTool(t *testing.T) {
 	product, ok := products[0].(map[string]any)
 	if !ok || product["url"] != "https://www.huize.com/product/1" {
 		t.Fatalf("product card url missing: %#v", products[0])
+	}
+	if product["price"] != "323元/年起" || product["price_label"] != "323元/年起" {
+		t.Fatalf("product card price missing: %#v", products[0])
 	}
 	sources := eventItems(events, chatflow.EventSources)
 	if len(sources) != 1 {
@@ -307,6 +463,19 @@ func (s *fakeFallbackSearcher) Search(_ context.Context, query string) ([]chatfl
 	return s.results, nil
 }
 
+type fakeProductPriceLookup struct {
+	byURL map[string]chatflow.ProductPrice
+	err   error
+}
+
+func (l fakeProductPriceLookup) LookupProductPrice(_ context.Context, productURL string) (chatflow.ProductPrice, bool, error) {
+	if l.err != nil {
+		return chatflow.ProductPrice{}, false, l.err
+	}
+	price, ok := l.byURL[productURL]
+	return price, ok, nil
+}
+
 type fakeFinalModel struct {
 	content string
 	err     error
@@ -334,6 +503,22 @@ func collect(ch <-chan agentruntime.AgentEvent) []agentruntime.AgentEvent {
 func hasEvent(events []agentruntime.AgentEvent, name string) bool {
 	for _, event := range events {
 		if event.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasThinkStatus(events []agentruntime.AgentEvent, want string) bool {
+	for _, event := range events {
+		if event.Name != chatflow.EventStatus {
+			continue
+		}
+		data, ok := event.Data.(map[string]any)
+		if !ok {
+			continue
+		}
+		if data["stage"] == "thinking" && data["think"] == want {
 			return true
 		}
 	}

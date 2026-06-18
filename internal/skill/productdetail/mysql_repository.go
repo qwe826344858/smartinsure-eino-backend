@@ -14,13 +14,13 @@ import (
 
 const (
 	productDetailsSelectColumns = `
-	product_key, platform, product_name, canonical_url, detail_json,
+	product_key, platform, product_name, canonical_url, price, price_label, detail_json,
 	source_hash, prompt_version, model_name, cn_char_count, match_rate,
 	status, rag_ingest_status, rag_ingest_source_hash, rag_ingest_error,
 	rag_ingest_updated_at, expires_at, created_at, updated_at, last_hit_at`
 
 	productDetailsSelectColumnsWithDetailAlias = `
-	d.product_key, d.platform, d.product_name, d.canonical_url, d.detail_json,
+	d.product_key, d.platform, d.product_name, d.canonical_url, d.price, d.price_label, d.detail_json,
 	d.source_hash, d.prompt_version, d.model_name, d.cn_char_count, d.match_rate,
 	d.status, d.rag_ingest_status, d.rag_ingest_source_hash, d.rag_ingest_error,
 	d.rag_ingest_updated_at, d.expires_at, d.created_at, d.updated_at, d.last_hit_at`
@@ -97,6 +97,9 @@ func (r *MySQLDetailRepository) EnsureSchema(ctx context.Context) error {
 	if err := r.ensureProductDetailRAGColumns(ctx); err != nil {
 		return err
 	}
+	if err := r.ensureProductDetailPriceColumns(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -166,6 +169,38 @@ func (r *MySQLDetailRepository) Upsert(ctx context.Context, input UpsertProductD
 		}
 	}
 	return tx.Commit()
+}
+
+func (r *MySQLDetailRepository) UpdatePriceByURL(ctx context.Context, input UpdateProductDetailPriceInput) (bool, error) {
+	if err := r.ready(); err != nil {
+		return false, err
+	}
+	productURL := strings.TrimSpace(input.ProductURL)
+	if productURL == "" {
+		return false, fmt.Errorf("%w: product_url is required", ErrInvalidDetailInput)
+	}
+	price := strings.TrimSpace(input.Price)
+	priceLabel := strings.TrimSpace(input.PriceLabel)
+	if priceLabel == "" && price != "" {
+		priceLabel = price
+	}
+	if price == "" && priceLabel == "" {
+		return false, nil
+	}
+	identity, err := r.keyer.Key(productURL)
+	if err != nil {
+		return false, err
+	}
+	stmt := buildProductDetailPriceUpdateStatement(identity.ProductKey, price, priceLabel, r.now())
+	result, err := r.db.ExecContext(ctx, stmt.Query, stmt.Args...)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 func (r *MySQLDetailRepository) UpdateRAGIngestState(ctx context.Context, input UpdateRAGIngestStateInput) error {
@@ -289,6 +324,22 @@ func productDetailRAGColumnMigrations() []productDetailColumnMigration {
 	}
 }
 
+func (r *MySQLDetailRepository) ensureProductDetailPriceColumns(ctx context.Context) error {
+	for _, migration := range productDetailPriceColumnMigrations() {
+		if err := r.ensureColumn(ctx, "product_details", migration.Name, migration.Definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func productDetailPriceColumnMigrations() []productDetailColumnMigration {
+	return []productDetailColumnMigration{
+		{Name: "price", Definition: "VARCHAR(64) NOT NULL DEFAULT ''"},
+		{Name: "price_label", Definition: "VARCHAR(64) NOT NULL DEFAULT ''"},
+	}
+}
+
 func (r *MySQLDetailRepository) ensureColumn(ctx context.Context, tableName, columnName, definition string) error {
 	var count int
 	if err := r.db.QueryRowContext(ctx, `
@@ -314,6 +365,8 @@ func ProductDetailSchemaStatements() []string {
   platform VARCHAR(64) NOT NULL,
   product_name VARCHAR(255) NOT NULL DEFAULT '',
   canonical_url TEXT NOT NULL,
+  price VARCHAR(64) NOT NULL DEFAULT '',
+  price_label VARCHAR(64) NOT NULL DEFAULT '',
   detail_json JSON NOT NULL,
   source_hash VARCHAR(64) NOT NULL DEFAULT '',
   prompt_version VARCHAR(64) NOT NULL DEFAULT '',
@@ -403,6 +456,11 @@ func normalizeProductDetailUpsert(input UpsertProductDetailInput, keyer ProductK
 	detail := input.Detail
 	detail.ProductURL = identity.NormalizedURL
 	detail.Platform = platform
+	detail.Price = strings.TrimSpace(detail.Price)
+	detail.PriceLabel = strings.TrimSpace(detail.PriceLabel)
+	if detail.PriceLabel == "" && detail.Price != "" {
+		detail.PriceLabel = detail.Price
+	}
 	productName := strings.TrimSpace(detail.ProductName)
 
 	urlHash := strings.TrimSpace(input.NormalizedURLHash)
@@ -415,6 +473,8 @@ func normalizeProductDetailUpsert(input UpsertProductDetailInput, keyer ProductK
 		ProductName:         productName,
 		CanonicalURL:        identity.NormalizedURL,
 		URLHash:             urlHash,
+		Price:               detail.Price,
+		PriceLabel:          detail.PriceLabel,
 		Detail:              detail,
 		SourceHash:          strings.TrimSpace(input.SourceHash),
 		PromptVersion:       strings.TrimSpace(input.PromptVersion),
@@ -438,16 +498,18 @@ func buildProductDetailUpsertStatement(record StoredProductDetail, now time.Time
 	return detailSQLStatement{
 		Query: `
 INSERT INTO product_details (
-	product_key, platform, product_name, canonical_url, detail_json,
+	product_key, platform, product_name, canonical_url, price, price_label, detail_json,
 	source_hash, prompt_version, model_name, cn_char_count, match_rate,
 	status, rag_ingest_status, rag_ingest_source_hash, rag_ingest_error,
 	rag_ingest_updated_at, expires_at, created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
 	platform = VALUES(platform),
 	product_name = VALUES(product_name),
 	canonical_url = VALUES(canonical_url),
+	price = VALUES(price),
+	price_label = VALUES(price_label),
 	detail_json = VALUES(detail_json),
 	source_hash = VALUES(source_hash),
 	prompt_version = VALUES(prompt_version),
@@ -466,6 +528,8 @@ ON DUPLICATE KEY UPDATE
 			record.Platform,
 			record.ProductName,
 			record.CanonicalURL,
+			record.Price,
+			record.PriceLabel,
 			string(detailJSON),
 			record.SourceHash,
 			record.PromptVersion,
@@ -555,6 +619,26 @@ ON DUPLICATE KEY UPDATE
 			now,
 		},
 	}, true, nil
+}
+
+func buildProductDetailPriceUpdateStatement(productKey, price, priceLabel string, now time.Time) detailSQLStatement {
+	return detailSQLStatement{
+		Query: `
+UPDATE product_details
+SET price = ?,
+    price_label = ?,
+    detail_json = JSON_SET(detail_json, '$.price', ?, '$.price_label', ?),
+    updated_at = ?
+WHERE product_key = ?`,
+		Args: []any{
+			strings.TrimSpace(price),
+			strings.TrimSpace(priceLabel),
+			strings.TrimSpace(price),
+			strings.TrimSpace(priceLabel),
+			now,
+			strings.TrimSpace(productKey),
+		},
+	}
 }
 
 func normalizeProductDetailSourceUpsert(record StoredProductDetail, source UpsertProductDetailSourceInput, now time.Time) ProductDetailSource {
@@ -663,6 +747,8 @@ func scanStoredProductDetail(row detailRowScanner) (*StoredProductDetail, error)
 		&record.Platform,
 		&record.ProductName,
 		&record.CanonicalURL,
+		&record.Price,
+		&record.PriceLabel,
 		&detailJSON,
 		&record.SourceHash,
 		&record.PromptVersion,
@@ -701,6 +787,8 @@ func scanStoredProductDetailWithSource(row detailRowScanner) (*StoredProductDeta
 		&record.Platform,
 		&record.ProductName,
 		&record.CanonicalURL,
+		&record.Price,
+		&record.PriceLabel,
 		&detailJSON,
 		&record.SourceHash,
 		&record.PromptVersion,
@@ -798,6 +886,23 @@ func fillStoredProductDetail(record *StoredProductDetail, detailJSON []byte, rag
 	}
 	if record.Detail.Platform == "" {
 		record.Detail.Platform = record.Platform
+	}
+	record.Price = strings.TrimSpace(record.Price)
+	record.PriceLabel = strings.TrimSpace(record.PriceLabel)
+	if record.PriceLabel == "" && record.Price != "" {
+		record.PriceLabel = record.Price
+	}
+	if record.Detail.Price == "" {
+		record.Detail.Price = record.Price
+	}
+	if record.Detail.PriceLabel == "" {
+		record.Detail.PriceLabel = record.PriceLabel
+	}
+	if record.Price == "" {
+		record.Price = record.Detail.Price
+	}
+	if record.PriceLabel == "" {
+		record.PriceLabel = record.Detail.PriceLabel
 	}
 	if record.Detail.CNCharCount == 0 {
 		record.Detail.CNCharCount = record.CNCharCount

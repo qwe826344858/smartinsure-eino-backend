@@ -82,6 +82,8 @@ type StoredProductDetail struct {
 	ProductName         string
 	CanonicalURL        string
 	URLHash             string
+	Price               string
+	PriceLabel          string
 	Detail              schema.ProductDetail
 	SourceHash          string
 	PromptVersion       string
@@ -237,4 +239,10 @@ type UpsertProductDetailSourceInput struct {
 	ContentHash       string
 	CNCharCount       int
 	FetchedAt         time.Time
+}
+
+type UpdateProductDetailPriceInput struct {
+	ProductURL string
+	Price      string
+	PriceLabel string
 }

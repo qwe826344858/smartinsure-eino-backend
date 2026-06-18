@@ -127,6 +127,8 @@ type ProductDetail struct {
 	ProductName string     `json:"product_name"`
 	ProductURL  string     `json:"product_url"`
 	Platform    string     `json:"platform"`
+	Price       string     `json:"price,omitempty"`
+	PriceLabel  string     `json:"price_label,omitempty"`
 	Duties      []DutyItem `json:"duties"`
 	CNCharCount int        `json:"cn_char_count"`
 	MatchRate   float64    `json:"match_rate"`

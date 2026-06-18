@@ -9,6 +9,7 @@ import (
 
 	"smartinsure-eino-backend/internal/llm"
 	"smartinsure-eino-backend/internal/schema"
+	"smartinsure-eino-backend/internal/search/parsers"
 )
 
 var (
@@ -116,14 +117,26 @@ func HeuristicExtract(cleanedText, productURL, productName string, cnCount int) 
 	if productName = strings.TrimSpace(productName); productName == "" {
 		productName = guessProductName(cleanedText)
 	}
-	return schema.ProductDetail{
+	return withExtractedPrice(schema.ProductDetail{
 		ProductName: productName,
 		ProductURL:  productURL,
 		Platform:    InferPlatform(productURL),
 		Duties:      duties,
 		CNCharCount: cnCount,
 		MatchRate:   matchRate,
+	}, cleanedText)
+}
+
+func withExtractedPrice(detail schema.ProductDetail, cleanedText string) schema.ProductDetail {
+	if strings.TrimSpace(detail.Price) == "" {
+		detail.Price = parsers.ParsePriceFromText(cleanedText)
 	}
+	detail.Price = strings.TrimSpace(detail.Price)
+	detail.PriceLabel = strings.TrimSpace(detail.PriceLabel)
+	if detail.PriceLabel == "" && detail.Price != "" {
+		detail.PriceLabel = detail.Price
+	}
+	return detail
 }
 
 func HeuristicExtractDuties(cleanedText string) []schema.DutyItem {

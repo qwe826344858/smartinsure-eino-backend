@@ -843,14 +843,14 @@ func (s *Service) extractDetail(ctx context.Context, cleanedText string, cnCount
 				name = strings.TrimSpace(productName)
 			}
 			logx.Printf("运行日志", "runtime log", "product_detail llm_extract_attempt_success attempt=%d max_attempts=%d duties=%d match_rate=%.3f duration_ms=%d", attempt, s.maxExtractRetry, len(payload.Duties), matchRate, time.Since(attemptStarted).Milliseconds())
-			return schema.ProductDetail{
+			return withExtractedPrice(schema.ProductDetail{
 				ProductName: name,
 				ProductURL:  productURL,
 				Platform:    InferPlatform(productURL),
 				Duties:      payload.Duties,
 				CNCharCount: cnCount,
 				MatchRate:   matchRate,
-			}, true
+			}, cleanedText), true
 		}
 	}
 

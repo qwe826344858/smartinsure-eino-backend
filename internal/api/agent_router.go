@@ -128,6 +128,7 @@ func (s *Server) serveAgentChat(w http.ResponseWriter, r *http.Request, forcedAg
 		Metadata:      body.Metadata,
 		History:       history,
 		TraceDisabled: !s.agentSettings.AgentTraceEnabled,
+		IncludeThink:  body.IncludeThink,
 	})
 	if err != nil {
 		if errors.Is(err, agentruntime.ErrAgentNotFound) {
@@ -173,6 +174,9 @@ func (r *chatRequest) normalizeAgentFields() {
 	}
 	if r.ProductName == "" {
 		r.ProductName = r.ProductNameAlt
+	}
+	if r.IncludeThinkAlt {
+		r.IncludeThink = true
 	}
 }
 

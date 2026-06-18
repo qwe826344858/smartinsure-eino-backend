@@ -131,6 +131,7 @@ func ParsePriceFromText(text string) string {
 		re     *regexp.Regexp
 		format string
 	}{
+		{regexp.MustCompile(`(\d+(?:\.\d+)?)\s*元/(年|月)起`), "{val}元/{unit}起"},
 		{regexp.MustCompile(`(\d+(?:\.\d+)?)\s*元/年`), "{val}元/年"},
 		{regexp.MustCompile(`[¥￥]\s*(\d+(?:\.\d+)?)`), "¥{val}"},
 		{regexp.MustCompile(`(\d+(?:\.\d+)?)\s*元起`), "{val}元起"},
@@ -138,7 +139,11 @@ func ParsePriceFromText(text string) string {
 	}
 	for _, pattern := range patterns {
 		if match := pattern.re.FindStringSubmatch(text); len(match) > 1 {
-			return strings.ReplaceAll(pattern.format, "{val}", match[1])
+			formatted := strings.ReplaceAll(pattern.format, "{val}", match[1])
+			if len(match) > 2 {
+				formatted = strings.ReplaceAll(formatted, "{unit}", match[2])
+			}
+			return formatted
 		}
 	}
 	return ""

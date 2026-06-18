@@ -25,10 +25,10 @@ func emitToolResult(out chan<- agentruntime.AgentEvent, toolName string, content
 			return
 		}
 	case toolKnowledgeSearch:
-		// 知识检索工具返回 RAG 产品卡片和 sources，分别映射为 products/sources 事件。
+		// 默认 DeepAgent 只映射 sources；RAG Agent 才把 RAG 产品卡映射为 products 事件。
 		var payload knowledgeSearchOutput
 		if json.Unmarshal([]byte(content), &payload) == nil {
-			if len(payload.Products) > 0 {
+			if shouldEmitKnowledgeProducts(req) && len(payload.Products) > 0 {
 				emitRuntimeEvent(out, chatflow.EventProducts, map[string]any{"items": payload.Products}, req, traceID)
 			}
 			if len(payload.Sources) > 0 {
@@ -50,4 +50,8 @@ func emitToolResult(out chan<- agentruntime.AgentEvent, toolName string, content
 	}
 	// JSON 解析失败或未知工具时仍输出 observing 状态，避免前端长时间停留在 tool_planning。
 	emitRuntimeEvent(out, chatflow.EventStatus, formatToolStatus(toolName), req, traceID)
+}
+
+func shouldEmitKnowledgeProducts(req agentruntime.AgentRequest) bool {
+	return req.AgentID == RAGAgentID
 }

@@ -63,6 +63,7 @@ type Flow struct {
 	Followup FollowupGenerator
 	Fallback FallbackSearcher
 	Detail   DetailRunner
+	Prices   ProductPriceLookup
 }
 
 type IntentClassifier interface {
@@ -91,6 +92,15 @@ type FallbackSearcher interface {
 
 type DetailRunner interface {
 	Run(ctx context.Context, req DetailRequest) <-chan Event
+}
+
+type ProductPriceLookup interface {
+	LookupProductPrice(ctx context.Context, productURL string) (ProductPrice, bool, error)
+}
+
+type ProductPrice struct {
+	Price      string
+	PriceLabel string
 }
 
 type DetailRequest struct {

@@ -95,6 +95,9 @@ func NewProduction() *Flow {
 		flow.Fallback = ragFallback
 	}
 	flow.Detail = detailAdapter{service: productdetail.NewService(detailOpts...)}
+	if priceLookup := productionProductPriceLookup(settings); priceLookup != nil {
+		flow.Prices = priceLookup
+	}
 
 	registry, err := llm.LoadRegistry(defaultProviderConfigPath, settings)
 	if err != nil {
@@ -118,9 +121,52 @@ func NewProduction() *Flow {
 	return flow
 }
 
+func productionProductPriceLookup(settings config.Settings) ProductPriceLookup {
+	if strings.TrimSpace(settings.MySQLDSN) == "" {
+		return nil
+	}
+	deps := sharedProductionDetailDeps(settings)
+	if deps.repository == nil {
+		return nil
+	}
+	return productDetailPriceLookupAdapter{repository: deps.repository}
+}
+
 type productionDetailDeps struct {
 	repository productdetail.DetailRepository
 	hotCache   productdetail.DetailHotCache
+}
+
+type productDetailPriceLookupAdapter struct {
+	repository productdetail.DetailRepository
+}
+
+func (a productDetailPriceLookupAdapter) LookupProductPrice(ctx context.Context, productURL string) (ProductPrice, bool, error) {
+	if a.repository == nil || strings.TrimSpace(productURL) == "" {
+		return ProductPrice{}, false, nil
+	}
+	record, err := a.repository.GetByURL(ctx, productURL)
+	if err != nil {
+		if errors.Is(err, productdetail.ErrProductDetailNotFound) {
+			return ProductPrice{}, false, nil
+		}
+		return ProductPrice{}, false, err
+	}
+	price := strings.TrimSpace(record.Price)
+	priceLabel := strings.TrimSpace(record.PriceLabel)
+	if price == "" {
+		price = strings.TrimSpace(record.Detail.Price)
+	}
+	if priceLabel == "" {
+		priceLabel = strings.TrimSpace(record.Detail.PriceLabel)
+	}
+	if priceLabel == "" && price != "" {
+		priceLabel = price
+	}
+	if price == "" && priceLabel == "" {
+		return ProductPrice{}, false, nil
+	}
+	return ProductPrice{Price: price, PriceLabel: priceLabel}, true, nil
 }
 
 type productionRAGDeps struct {
